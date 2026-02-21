@@ -1,0 +1,155 @@
+name: Postgres Tiered Query Benchmark
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: "Row counts (space-separated)"
+        default: "10 100 1000 10000"
+      toast:
+        description: "TOAST sizes (space-separated)"
+        default: "small medium large mixed"
+      strategies:
+        description: "Strategies (space-separated)"
+        default: "baseline pipeline parallel"
+      pg_version:
+        description: "PostgreSQL version"
+        default: "17"
+        type: choice
+        options:
+          - "16"
+          - "17"
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        pg_version: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', inputs.pg_version)) || fromJSON('["17"]') }}
+
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg_version }}
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: quicapi_bench
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --shm-size 256mb
+        ports:
+          - 5432:5432
+
+    env:
+      BENCH_DSN: postgresql://postgres:postgres@localhost:5432/quicapi_bench
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e ".[bench]"
+
+      - name: Show PostgreSQL version
+        run: |
+          psql "$BENCH_DSN" -c "SELECT version();"
+        env:
+          PGPASSWORD: postgres
+
+      - name: Configure PostgreSQL for benchmarking
+        run: |
+          psql "$BENCH_DSN" -c "ALTER SYSTEM SET shared_buffers = '128MB';"
+          psql "$BENCH_DSN" -c "ALTER SYSTEM SET work_mem = '16MB';"
+          psql "$BENCH_DSN" -c "ALTER SYSTEM SET effective_cache_size = '256MB';"
+          psql "$BENCH_DSN" -c "SELECT pg_reload_conf();"
+        env:
+          PGPASSWORD: postgres
+
+      - name: Run benchmark
+        run: |
+          ROWS="${{ inputs.rows || '10 100 1000' }}"
+          TOAST="${{ inputs.toast || 'small medium large mixed' }}"
+          STRATEGIES="${{ inputs.strategies || 'baseline pipeline parallel' }}"
+
+          python -m bench.runner \
+            --dsn "$BENCH_DSN" \
+            --rows $ROWS \
+            --toast $TOAST \
+            --strategies $STRATEGIES \
+            --warmup 2 \
+            --output results.json
+
+      - name: Print summary
+        if: always()
+        run: |
+          if [ -f results.json ]; then
+            python -c "
+          import json, sys
+
+          with open('results.json') as f:
+              results = json.load(f)
+
+          # Group by (row_count, toast_size)
+          groups = {}
+          for r in results:
+              key = (r['row_count'], r['toast_size'])
+              groups.setdefault(key, []).append(r)
+
+          print('=' * 90)
+          print(f'{\"Strategy\":<12} {\"Rows\":>7} {\"Toast\":<8} {\"Wall (ms)\":>12} {\"1st Row (ms)\":>14} {\"All Done (ms)\":>14} {\"Mem (KB)\":>10}')
+          print('-' * 90)
+
+          for (rc, ts), runs in sorted(groups.items()):
+              for r in runs:
+                  first = r.get('time_to_first_row_ms')
+                  done = r.get('time_to_all_complete_ms')
+                  print(
+                      f'{r[\"strategy\"]:<12} {rc:>7} {ts:<8} '
+                      f'{r[\"wall_time_ms\"]:>12.3f} '
+                      f'{first if first is not None else \"N/A\":>14} '
+                      f'{done if done is not None else \"N/A\":>14} '
+                      f'{r[\"memory_delta_kb\"]:>10.1f}'
+                  )
+
+              # Print tier-level buffer stats for tiered strategies.
+              for r in runs:
+                  if r['strategy'] != 'baseline':
+                      for t in r.get('tiers', []):
+                          hits = t.get('shared_hits', '-')
+                          reads = t.get('shared_reads', '-')
+                          plan = t.get('planning_time_ms', '-')
+                          print(f'  tier {t[\"tier\"]}: hits={hits} reads={reads} plan_ms={plan}')
+              print()
+
+          print('=' * 90)
+          "
+          fi
+
+      - name: Generate Markdown report
+        if: always()
+        run: |
+          if [ -f results.json ]; then
+            python -m bench.report results.json > report.md
+            cat report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-pg${{ matrix.pg_version }}
+          path: |
+            results.json
+            report.md
+          retention-days: 30

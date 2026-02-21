@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.backends"
+
+[project]
+name = "quicapi"
+version = "0.1.0"
+description = "Postgres tiered query benchmark"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "psycopg[binary]>=3.1",
+    "psycopg_pool>=3.1",
+    "sqlalchemy>=2.0",
+]
+
+[project.optional-dependencies]
+bench = [
+    "tracemalloc-utils>=0.1; python_version>='3.11'",
+]
+
+[project.scripts]
+quicapi-bench = "bench.runner:main"
