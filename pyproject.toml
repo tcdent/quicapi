@@ -1,6 +1,6 @@
 [build-system]
 requires = ["hatchling"]
-build-backend = "hatchling.backends"
+build-backend = "hatchling.build"
 
 [project]
 name = "quicapi"
@@ -15,9 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-bench = [
-    "tracemalloc-utils>=0.1; python_version>='3.11'",
-]
+bench = []
 
 [project.scripts]
 quicapi-bench = "bench.runner:main"
