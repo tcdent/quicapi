@@ -19,3 +19,6 @@ bench = []
 
 [project.scripts]
 quicapi-bench = "bench.runner:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["bench"]
